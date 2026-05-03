@@ -65,7 +65,7 @@ fitness_rag/
 
 ```bash
 git clone https://github.com/MedMassous/FitRAG.git
-cd fitness_rag
+cd FitRAG
 ```
 
 ### 2. Create virtual environment
