@@ -1,0 +1,36 @@
+# ─────────────────────────────────────────────
+# FitRAG — Requirements
+# Python 3.10+ recommended
+# ─────────────────────────────────────────────
+
+# ── LLM & RAG ───────────────────────────────
+# FIX #10: groq==0.9.0 is severely outdated (current SDK is 0.28+).
+# Using >=0.9.0 allows pip to resolve the latest compatible version.
+groq>=0.9.0
+
+# FIX #11: langchain.text_splitter was removed in langchain 0.3.
+# We use the standalone langchain-text-splitters package directly,
+# without needing the full langchain or langchain-community packages.
+langchain-text-splitters>=0.2.4
+
+# ── Embeddings ───────────────────────────────
+sentence-transformers>=3.0.1         # all-MiniLM-L6-v2 (local, free)
+# torch is a transitive dep of sentence-transformers.
+# Do NOT pin it tightly here — let sentence-transformers resolve
+# the compatible version for the current platform.
+
+# ── Vector DB ────────────────────────────────
+# FIX #12: faiss-cpu==1.8.0.post1 does not exist on PyPI for all
+# platforms and caused install failures.  Use a flexible lower bound.
+faiss-cpu>=1.7.4
+
+# ── PDF Parsing ──────────────────────────────
+PyMuPDF>=1.24.0                      # fitz — fast, reliable PDF extraction
+
+# ── UI ───────────────────────────────────────
+streamlit>=1.38.0
+
+# ── Utilities ────────────────────────────────
+python-dotenv>=1.0.0
+# Keep numpy <2.0 — faiss-cpu links against numpy C API that breaks on 2.x
+numpy>=1.24.0,<2.0
