@@ -12,7 +12,7 @@ from collections import Counter, defaultdict
 
 import numpy as np
 
-from ingestion import FAISSIndex, EmbeddingModel, load_index_and_chunks
+from ingestion import ChromaIndex, EmbeddingModel, load_index_and_chunks
 
 log = logging.getLogger(__name__)
 
@@ -133,10 +133,10 @@ def rerank(
 # ─────────────────────────────────────────────
 
 class FitnessRetriever:
-    """Hybrid retriever: FAISS semantic + BM25 keyword + RRF fusion + re-rank."""
+    """Hybrid retriever: ChromaDB semantic + BM25 keyword + RRF fusion + re-rank."""
 
     def __init__(self):
-        self.faiss_idx, self.chunks = load_index_and_chunks()
+        self.chroma_idx, self.chunks = load_index_and_chunks()
         self.embedder = EmbeddingModel.get()
         self._bm25: Optional[BM25] = None
 
@@ -159,9 +159,9 @@ class FitnessRetriever:
         if not self.chunks:
             return []
 
-        # 1. Semantic search
+        # 1. Semantic search via ChromaDB collection.query()
         q_vec = self.embedder.embed([query])
-        sem_scores, sem_ids = self.faiss_idx.search(q_vec, k=TOP_K_SEMANTIC)
+        sem_scores, sem_ids = self.chroma_idx.search(q_vec, k=TOP_K_SEMANTIC)
 
         sem_ids_valid = [
             (int(i), float(s))
@@ -209,6 +209,6 @@ class FitnessRetriever:
         return sorted({c["source"] for c in self.chunks})
 
     def refresh(self):
-        self.faiss_idx, self.chunks = load_index_and_chunks()
+        self.chroma_idx, self.chunks = load_index_and_chunks()
         self._bm25 = None
         log.info(f"Retriever refreshed — {len(self.chunks)} chunks loaded")
