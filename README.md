@@ -72,7 +72,7 @@ cd FitRAG
 ### 2. Create virtual environment
 
 ```bash
-python -m venv venv
+python -m venv venv OR python3.10 -m venv venv
 source venv/bin/activate        # macOS / Linux
 venv\Scripts\activate           # Windows
 ```
