@@ -64,7 +64,7 @@ fitness_rag/
 ### 1. Clone / copy the project
 
 ```bash
-git clone <repo> fitness_rag
+git clone https://github.com/MedMassous/FitRAG.git
 cd fitness_rag
 ```
 
