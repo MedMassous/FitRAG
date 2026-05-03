@@ -12,8 +12,8 @@ from pathlib import Path
 from typing import List, Dict, Tuple, Optional
 from datetime import datetime
 
-import fitz 
-import faiss
+import fitz
+import chromadb
 import numpy as np
 from sentence_transformers import SentenceTransformer
 
@@ -22,7 +22,8 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 # ─────────────────────────────────────────────
 # Configuration — read from env vars with sensible defaults
 # ─────────────────────────────────────────────
-VECTOR_DB_PATH = Path("data/faiss_index")
+CHROMA_DB_PATH = os.getenv("CHROMA_DB_PATH", "./chroma_db")
+CHROMA_COLLECTION = "fitness_chunks"
 METADATA_PATH  = Path("data/metadata.json")
 CHUNKS_PATH    = Path("data/chunks.json")
 HASH_PATH      = Path("data/processed_hashes.json")
@@ -41,8 +42,7 @@ log = logging.getLogger(__name__)
 # ─────────────────────────────────────────────
 
 def _ensure_dirs():
-    for p in [VECTOR_DB_PATH, METADATA_PATH.parent]:
-        p.mkdir(parents=True, exist_ok=True)
+    METADATA_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 
 def _file_hash(path: str) -> str:
@@ -144,37 +144,80 @@ class EmbeddingModel:
 
 
 # ─────────────────────────────────────────────
-# FAISS Index Manager
+# ChromaDB Index Manager
 # ─────────────────────────────────────────────
 
-class FAISSIndex:
+class ChromaIndex:
+    """Persistent ChromaDB collection with cosine similarity search."""
+
     def __init__(self):
-        self.index_file = VECTOR_DB_PATH / "index.faiss"
-        self.index: Optional[faiss.Index] = None
-        self._load_or_create()
+        self.client = chromadb.PersistentClient(path=CHROMA_DB_PATH)
+        self.collection = self.client.get_or_create_collection(
+            name=CHROMA_COLLECTION,
+            metadata={"hnsw:space": "cosine"},
+        )
+        log.info(
+            f"ChromaDB ready — collection '{CHROMA_COLLECTION}' "
+            f"({self.collection.count()} vectors) at '{CHROMA_DB_PATH}'"
+        )
 
-    def _load_or_create(self):
-        if self.index_file.exists():
-            log.info("Loading existing FAISS index…")
-            self.index = faiss.read_index(str(self.index_file))
-        else:
-            log.info("Creating new FAISS index…")
-            self.index = faiss.IndexFlatIP(EMBED_DIM)
-
-    def add(self, vectors: np.ndarray):
-        self.index.add(vectors)
-        self._save()
+    def add(self, vectors: np.ndarray, chunks: List[Dict], start_idx: int):
+        """Store embeddings together with document text and metadata."""
+        ids         = [c["chunk_id"] for c in chunks]
+        embeddings  = vectors.tolist()
+        documents   = [c["text"] for c in chunks]
+        metadatas   = [
+            {
+                "source":      c["source"],
+                "page":        c["page"],
+                "chunk_index": start_idx + i,   # integer position in chunks.json
+            }
+            for i, c in enumerate(chunks)
+        ]
+        self.collection.upsert(
+            ids=ids,
+            embeddings=embeddings,
+            documents=documents,
+            metadatas=metadatas,
+        )
 
     def search(self, query_vec: np.ndarray, k: int = 6) -> Tuple[np.ndarray, np.ndarray]:
-        scores, indices = self.index.search(query_vec, k)
-        return scores[0], indices[0]
+        """
+        Return top-k (scores, integer_indices) matching the retriever contract.
 
-    def _save(self):
-        faiss.write_index(self.index, str(self.index_file))
+        ChromaDB cosine distance:  0 = identical, 2 = opposite.
+        We convert to similarity:  score = 1 - distance  (matches FAISS IP range).
+        """
+        n = min(k, self.collection.count())
+        if n == 0:
+            return np.array([], dtype=np.float32), np.array([], dtype=np.int64)
+
+        results = self.collection.query(
+            query_embeddings=query_vec.tolist(),
+            n_results=n,
+            include=["distances", "metadatas"],
+        )
+
+        distances = np.array(results["distances"][0], dtype=np.float32)
+        scores    = 1.0 - distances                                   # cosine similarity
+        indices   = np.array(
+            [m["chunk_index"] for m in results["metadatas"][0]],
+            dtype=np.int64,
+        )
+        return scores, indices
+
+    def reset(self):
+        """Delete and recreate the collection (used by reindex_all)."""
+        self.client.delete_collection(CHROMA_COLLECTION)
+        self.collection = self.client.get_or_create_collection(
+            name=CHROMA_COLLECTION,
+            metadata={"hnsw:space": "cosine"},
+        )
+        log.info("ChromaDB collection reset.")
 
     @property
     def total(self) -> int:
-        return self.index.ntotal
+        return self.collection.count()
 
 
 # ─────────────────────────────────────────────
@@ -184,7 +227,7 @@ class FAISSIndex:
 class IngestionPipeline:
     def __init__(self):
         _ensure_dirs()
-        self.faiss_idx  = FAISSIndex()
+        self.chroma_idx = ChromaIndex()
         self.embedder   = EmbeddingModel.get()
         self.chunks     = _load_json(CHUNKS_PATH, [])
         self.metadata   = _load_json(METADATA_PATH, {})
@@ -215,7 +258,7 @@ class IngestionPipeline:
 
             start_idx = len(self.chunks)
             self.chunks.extend(chunks)
-            self.faiss_idx.add(vectors)
+            self.chroma_idx.add(vectors, chunks, start_idx)   # ids + embeddings + metadata
 
             self.metadata[fname] = {
                 "path":        path,
@@ -234,7 +277,7 @@ class IngestionPipeline:
             "indexed":       new_files,
             "skipped":       skipped,
             "total_chunks":  len(self.chunks),
-            "total_vectors": self.faiss_idx.total,
+            "total_vectors": self.chroma_idx.total,
         }
 
     def reindex_all(self, pdf_paths: List[str]) -> Dict:
@@ -246,9 +289,7 @@ class IngestionPipeline:
         for p in [CHUNKS_PATH, METADATA_PATH, HASH_PATH]:
             if p.exists():
                 p.unlink()
-        for f in VECTOR_DB_PATH.glob("*"):
-            f.unlink()
-        self.faiss_idx = FAISSIndex()   # fresh in-memory + on-disk index
+        self.chroma_idx.reset()   # drops + recreates the ChromaDB collection
         return self.ingest(pdf_paths)
 
     def get_indexed_files(self) -> List[Dict]:
@@ -264,9 +305,9 @@ class IngestionPipeline:
 # Convenience loader (used by retriever)
 # ─────────────────────────────────────────────
 
-def load_index_and_chunks() -> Tuple[FAISSIndex, List[Dict]]:
-    """Load persisted FAISS index + chunk metadata."""
+def load_index_and_chunks() -> Tuple["ChromaIndex", List[Dict]]:
+    """Load persistent ChromaDB index + chunk metadata from disk."""
     _ensure_dirs()
-    idx    = FAISSIndex()
+    idx    = ChromaIndex()
     chunks = _load_json(CHUNKS_PATH, [])
     return idx, chunks
